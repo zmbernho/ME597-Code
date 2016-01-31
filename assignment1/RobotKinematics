@@ -1,0 +1,81 @@
+unction RobotKinematics
+% This function models the kinematics of a three wheeled robot
+% With the robot's wheels oriented normal the the corners of an equilateral
+% triagle.
+
+% Variables
+% w# variables represent the angular velocity of the three wheels, 0, 1, 2.
+double w0;
+double w1;
+double w2;
+
+% Unit Vectors for each wheel for a positive CCW rotation
+F0 = [0 1];
+F1 = [-sqrt(3)/2 -1/2];
+F2 = [sqrt(3)/2 -1/2];
+
+% The v# variables represent the linear velocities of the three wheels
+double v0;
+double v1;
+double v2;
+
+% l is the wheel baseline
+l = 0.3;
+
+% r is the wheel radius
+r = 0.25;
+
+% wRobot is the rotational velocity of the entire robot
+wRobot = 0;
+
+% Wheel rotation speeds in rad/s
+w0 = -1.5;
+w1 = 2.0;
+w2 = 1.0;
+
+% % Straight Line
+% w0 = 0;
+% w1 = 1.5;
+% w2 = -1.5;
+% 
+% % Initial
+% w0 = -1.5;
+% w1 = 2.0;
+% w2 = 1.0;
+
+% Circle
+
+% Loop for 15 seconds at 10 Hz update rate (150)
+i = 1; 
+x(i) = 0;
+y(i) = 0;
+while i <= 150
+
+% Gaussian Noise Distributions for x and y
+n = 1;
+a = 0.01*randn(n,1);
+b = 0.01*randn(n,1);
+c = 10*b; % Degrees Scaling, 0.1 additive Gaussian Noise
+
+% Math to create Gaussian noise for addition to X and Y
+z1 = a+b; % Velocity Noise
+z2 = a+c; % Angular Noise
+    
+    wRobot(i) = (w0 + w1 + w2) .* (1+ z2);
+    v0(1) = 0;
+    v0(2) = (w0.*r - l.*wRobot(i))/F0(2); % X Y velocity Vector
+    v1 = (w1.*r - l.*wRobot(i))./F1; % X Y Velocity Vector
+    v2 = (w2.*r - l.*wRobot(i))./F2; % X Y Velocity Vector
+    v = v0 + v1 + v2; % Velocity Total as an [x y] vector
+    deltaX = v(1).*(1+ z1); % Change in x per time step
+    deltaY = v(2).*(1+ z1); % Change in y per time step
+    x(i+1) = x(i) + deltaX;
+    y(i+1) = y(i) + deltaY;
+    i = i+1;
+end
+figure (1); clf; hold on;
+% title ('X Y position of Robot for inital wheel speeds');
+% xaxistitle ('X Position [m]');
+% yaxistitle ('Y Position [m]');
+plot (x,y)
+
