@@ -1,0 +1,660 @@
+//  ///////////////////////////////////////////////////////////
+//
+// turtlebot_example.cpp
+// This file contains example code for use with ME 597 lab 2
+// It outlines the basic setup of a ros node and the various
+// inputs and outputs needed for this lab
+//
+// Author: James Servos
+//
+// //////////////////////////////////////////////////////////
+#include <ros/ros.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/Twist.h>
+#include <tf/transform_datatypes.h>
+#include <gazebo_msgs/ModelStates.h>
+#include <visualization_msgs/Marker.h>
+#include <visualization_msgs/MarkerArray.h>
+#include <nav_msgs/OccupancyGrid.h>
+#include <tf/transform_broadcaster.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <nav_msgs/Path.h>
+
+//Used to sort a vector in ascending order
+namespace Solution3
+{     
+  template<class T>
+  struct CompareDeref
+  {
+    bool operator()( const T& a, const T& b ) const
+      { return *a < *b; }
+  };
+
+
+  template<class T, class U>
+  struct Pair2nd
+  {
+    const U& operator()( const std::pair<T,U>& a ) const
+      { return a.second; }
+  };
+
+
+  template<class IterIn, class IterOut>
+  void sort_idxtbl( IterIn first, IterIn last, IterOut out )
+  {
+    std::multimap<IterIn, int, CompareDeref<IterIn> > v;
+    for( int i=0; first != last; ++i, ++first )
+      v.insert( std::make_pair( first, i ) );
+    std::transform( v.begin(), v.end(), out,
+                    Pair2nd<IterIn const,int>() );
+  }
+}
+
+
+#define TAGID 0
+
+//number of sample points
+const int nS = 500;
+bool live = true;
+//Callback function for the Position topic (LIVE)
+double ips_x= -100;
+double ips_y = -100;
+double ips_yaw = 0;
+
+bool ips_check = false;
+tf::TransformBroadcaster *br;
+tf::Transform *tform;
+void pose_callback(const geometry_msgs::PoseWithCovarianceStamped & msg)
+{
+    ips_check = true;
+    float temp_yaw = tf::getYaw(msg.pose.pose.orientation);
+    if(temp_yaw>0){
+        temp_yaw = temp_yaw*-1+M_PI;
+    }
+    else{
+        temp_yaw = temp_yaw*-1-M_PI;
+    }
+	//This function is called when a new position message is received
+    if(live){
+      ips_x = msg.pose.pose.position.x*-2.17; // Robot X psotition
+      ips_y = msg.pose.pose.position.y*2.17; // Robot Y psotition
+      ips_yaw = temp_yaw; // Robot Yaw
+    } else {
+      ips_x = msg.pose.pose.position.x; // Robot X psotition
+      ips_y = msg.pose.pose.position.y; // Robot Y psotition
+      ips_yaw = tf::getYaw(msg.pose.pose.orientation); // Robot Yaw
+    }
+}
+
+
+float dxy = 1;
+int width = 0;
+int height = 0;
+float xOrigin = 0;
+float yOrigin = 0;
+std::vector< std::vector< int > > map;
+//Callback function for the map
+void map_callback(const nav_msgs::OccupancyGrid& msg)
+{
+    dxy = msg.info.resolution;
+    width = msg.info.width;
+    height = msg.info.height;
+    xOrigin = msg.info.origin.position.x;
+    yOrigin = msg.info.origin.position.y;
+    map.resize(width , std::vector<int>( height , 0 ) );
+
+	//creates a map with padded objects to take into account the robot radius
+    std::vector< std::vector< int > > tempmap(width,std::vector<int>( height , 0 ));
+
+    for(int i=0;i<height;i++){
+      for(int j = 0; j<width;j++){
+        tempmap[j][i]=msg.data[i*width+j];
+      }
+    }
+
+    map = tempmap;
+    int bound = 3;
+    if(live){
+      bound = 3;
+    }
+
+    for(int i=0;i<height;i++){
+      for(int j = 0; j<width;j++){
+        if(tempmap[j][i]>0){
+          for(int k=-bound;k<=bound;k++){
+            if(i+k>=0&&i+k<height){
+              for(int l = -bound; l<=bound;l++){
+                if(j+l>=0&&j+l<width){
+                  map[j+l][i+k]=100;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+}
+
+short sgn(int x) { return x >= 0 ? 1 : -1; }
+
+// Usage: (x0, y0) is the first point and (x1, y1) is the second point. The calculated
+//        points (x, y) are stored in the x and y vector. x and y should be empty
+//        vectors of integers and should be defined where this function is called from.
+void bresenham(int x0, int y0, int x1, int y1, std::vector<int>& x, std::vector<int>& y) {
+
+    int dx = abs(x1 - x0);
+    int dy = abs(y1 - y0);
+    int dx2 = x1 - x0;
+    int dy2 = y1 - y0;
+
+    const bool s = abs(dy) > abs(dx);
+
+    if (s) {
+        int dx2 = dx;
+        dx = dy;
+        dy = dx2;
+    }
+
+    int inc1 = 2 * dy;
+    int d = inc1 - dx;
+    int inc2 = d - dx;
+
+    x.push_back(x0);
+    y.push_back(y0);
+
+    while (x0 != x1 || y0 != y1) {
+        if (s) y0+=sgn(dy2); else x0+=sgn(dx2);
+        if (d < 0) d += inc1;
+        else {
+            d += inc2;
+            if (s) x0+=sgn(dx2); else y0+=sgn(dy2);
+        }
+
+        //Add point to vector
+        //ROS_INFO("x,y: %d,%d",x0,y0);
+        x.push_back(x0);
+        y.push_back(y0);
+    }
+}
+
+//Checks if a line intersects with an object
+int CheckCollisionMap(int pt1X, int pt1Y, int pt2X, int pt2Y)
+{
+  std::vector<int> x, y;
+  bresenham(pt1X, pt1Y, pt2X, pt2Y, x, y);
+  for (long k = 0;k<x.size();k++){
+    if (map[(int)round(x[k]-xOrigin/dxy)][(int)round(y[k]-yOrigin/dxy)] > 0){
+      return 1;
+    }
+  }
+  return 0;
+}
+
+//finds the shortest path from a point to another point using the A* algorithm 
+std::vector<int> shortestpath(std::vector<std::vector<int> > &nodes, std::vector<std::vector<int> > &edges, int start, int finish)
+{
+  //Find edge lengths
+  int n = nodes.size();
+  std::vector<std::vector<float> >dists (n,std::vector<float>(n,0));
+  int tmpX,tmpY;
+  for (int i = 0;i<n;i++){
+      for (int j = i;j<n;j++){
+          if (edges[i][j]==1){
+            tmpX = nodes[i][0] - nodes[j][0];
+            tmpY = nodes[i][1] - nodes[j][1];
+            dists[i][j] = sqrt(tmpX*tmpX + tmpY*tmpY);
+            dists[j][i] = dists[i][j];
+          }
+      }
+  }
+
+  //Initialize open set (node, backtrack, lower bound cost, current cost)
+  tmpX = nodes[start][0] - nodes[finish][0];
+  tmpY = nodes[start][1] - nodes[finish][1];
+  float dmax = sqrt(tmpX*tmpX + tmpY*tmpY);
+
+  std::vector<int> spath;
+  std::vector<std::vector<float> > Open;
+  float arr[4] = {start, 0, dmax, 0};
+  std::vector<float> bestnode (arr, arr+4);
+  Open.push_back(bestnode);
+  //Initialize closed set (same as open set)
+  std::vector<std::vector<float> > Closed;
+  int done = 0;
+  int t = 0;
+  //Main algorithm
+  ROS_INFO("loop time");
+  while (!done&&ros::ok){
+      //Check if open set is empty
+      if (Open.size()==0){
+          spath.resize(0);
+          //sdist = 0;
+          return spath;
+      }
+      //Find best node in open set
+      int best = 0;
+      float tempDist = 1000000;
+      for(int num = 0; num<Open.size();num++){
+        if(Open[num][2]<tempDist){
+          tempDist = Open[num][2];
+          best = num;
+        }
+      }
+
+      bestnode = Open[best];
+
+      //Move best to closed set
+      Closed.push_back(bestnode);
+
+      //Check end condition
+      if (bestnode[0]==finish){
+          done = 1;
+          continue;
+      }
+
+      std::vector<int> neigh;
+      //Get all neighbours of best node
+      for(int index = 0; index<edges[0].size(); index++){
+        if(edges[bestnode[0]][index]==1){
+          neigh.push_back(index);
+        }
+      }
+
+      //Process each neighbour
+      for (int i=0;i<neigh.size();i++){
+        int found = -1;
+        //Get all neighbours of best node
+        for(int index = 0; index<Closed.size(); index++){
+          if(Closed[index][0]==neigh[i]){
+            found = index;
+            break;
+          }
+        }
+        if (found!=-1){
+            continue;
+        }
+
+        tmpX = nodes[neigh[i]][0] - nodes[finish][0];
+        tmpY = nodes[neigh[i]][1] - nodes[finish][1];
+        float dtogo = sqrt(tmpX*tmpX + tmpY*tmpY);
+        float dcur = bestnode[3]+dists[bestnode[0]][neigh[i]];
+
+        found = -1;
+        for(int index = 0; index<Open.size(); index++){
+          if(Open[index][0]==neigh[i]){
+            found = index;
+            break;
+          }
+        }
+
+        float arr[4] = {neigh[i], bestnode[0], dtogo+dcur, dcur};
+        std::vector<float> row (arr,arr+4);
+        if (found==-1){
+          Open.push_back(row);
+        }else{
+          if (dcur < Open[found][3]){
+            Open[found] = row;
+          }
+        }
+      }
+      Open.erase(Open.begin()+best);
+    }
+  //Find final path through back tracing
+  done = 0;
+  int cur = finish;
+  int curC = -1;
+  for(int index = 0; index<Closed.size(); index++){
+    if(Closed[index][0]==finish){
+      curC = index;
+      break;
+    }
+  }
+  if(curC==-1){
+    ROS_INFO("didn't find");
+  }
+  
+  int prev =  Closed[curC][1];
+  spath.push_back(cur);
+  while (!done&&ros::ok){
+      if (prev == start){
+          done = 1;
+      }
+      cur = prev;
+      for(int index = 0; index<Closed.size(); index++){
+          if(Closed[index][0]==cur){
+            curC = index;
+            break;
+          }
+        }
+      prev = Closed[curC][1];
+      spath.insert(spath.begin(),cur);
+  }
+  return spath;
+}
+
+int main(int argc, char **argv)
+{
+	//Initialize the ROS framework
+    ros::init(argc,argv,"main_control");
+    ros::NodeHandle n;
+    ROS_INFO("Start");
+    //Subscribe to the desired topics and assign callbacks
+    ros::Subscriber map_sub = n.subscribe("/map", 1, map_callback);
+    ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callback);
+
+    //Setup topics to Publish from this node
+    ros::Publisher velocity_publisher = n.advertise<geometry_msgs::Twist>("/cmd_vel_mux/input/navi", 1);
+    ros::Publisher marker_pub = n.advertise<visualization_msgs::MarkerArray>("visualization_marker_array", 1, true);
+
+    ros::Publisher path_pub = n.advertise<nav_msgs::Path>("/path", 1, true);
+
+    //Velocity control variable
+    geometry_msgs::Twist vel;
+
+    
+    //Point to display on rviz
+    nav_msgs::Path path;
+    geometry_msgs::PoseStamped path_pos;
+
+	//wait till initial position is found
+    while(ros::ok&&ips_x==-100){
+      ros::spinOnce();
+    }
+
+	//initialise display variables
+    geometry_msgs::Point start_point, end_point;
+    visualization_msgs::Marker lines;
+    lines.header.frame_id = "/map";
+    lines.type = visualization_msgs::Marker::LINE_STRIP;
+    lines.action = visualization_msgs::Marker::ADD;
+    lines.ns = "line_segments";
+    lines.scale.x = 0.01;
+    lines.color.r = 1.0;
+    lines.color.b = 1.0;
+    lines.color.a = 1.0;
+
+    geometry_msgs::Point marker_point;
+    visualization_msgs::MarkerArray pointArr;
+    visualization_msgs::Marker points;
+    points.header.frame_id   = "/map";
+    points.ns                = "points_and_lines";
+    points.action            = visualization_msgs::Marker::ADD;
+    points.id                = 0;
+    points.type              = visualization_msgs::Marker::POINTS;
+    points.scale.x           = 0.1;
+    points.scale.y           = 0.1;
+    points.color.r           = 1.0f;
+    points.color.a           = 1;
+
+    visualization_msgs::Marker mainpoints;
+    mainpoints.header.frame_id   = "/map";
+    mainpoints.ns                = "points_and_lines";
+    mainpoints.action            = visualization_msgs::Marker::ADD;
+    mainpoints.id                = 900;
+    mainpoints.type              = visualization_msgs::Marker::POINTS;
+    mainpoints.scale.x           = 0.2;
+    mainpoints.scale.y           = 0.1;
+    mainpoints.color.r           = 1.0f;
+    mainpoints.color.g           = 0.27;
+    mainpoints.color.a           = 1;
+
+    path.header.frame_id     = "/map";
+    path_pos.header.frame_id = "/path_pos_frame";
+
+    int numPoints = 4;
+    std::vector< std::vector< float > > waypoint;
+	
+	//live waypoints 
+     float arr1[3]={ips_x/dxy,ips_y/dxy,ips_yaw};
+     float arr2[3]={0.08/dxy,0.6/dxy,M_PI};
+     float arr3[3]={1.45/dxy,-2.23/dxy,0.0};
+     float arr4[3]={-1.72/dxy,0.43/dxy,-M_PI/2};
+	 
+	//Sim waypoints
+//     float arr1[3]={ips_x/dxy,ips_y/dxy,ips_yaw};
+//     float arr2[3]={4.0/dxy,0.0,0.0};
+//     float arr3[3]={8.0/dxy,0.0,-1.57};
+//     float arr4[3]={8.0/dxy,-4.0/dxy,3.14};
+
+    std::vector< float > vec1(arr1,arr1+3);
+    std::vector< float > vec2(arr2,arr2+3);
+    std::vector< float > vec3(arr3,arr3+3);
+    std::vector< float > vec4(arr4,arr4+3);
+    waypoint.push_back(vec1);
+    waypoint.push_back(vec2);
+    waypoint.push_back(vec3);
+    waypoint.push_back(vec4);
+
+    ROS_INFO("waypoints done");
+	
+    std::vector< std::vector< int > > samples ( nS, std::vector<int> ( 2, 0 ) );
+
+    ROS_INFO("waypoints 2");
+	//Insert waypoints as samples
+    for(int i = 0; i<numPoints; i++){
+      samples[i][0] = (int)round(waypoint[i][0]);
+      samples[i][1] = (int)round(waypoint[i][1]);
+      marker_point.x = samples[i][0]*dxy;
+      marker_point.y = samples[i][1]*dxy;
+      mainpoints.points.push_back(marker_point);
+    }
+    pointArr.markers.push_back(mainpoints);
+	
+	//Find potential samples
+    ROS_INFO("waypoints 3");
+    int tempX, tempY;
+    srand (time(NULL));
+    for (int i = numPoints;i < nS; i++){
+      samples[i][0] = (int)round(((double)(rand())/RAND_MAX * (width-1) + xOrigin/dxy));
+      samples[i][1] = (int)round(((double)(rand())/RAND_MAX * (height-1) + yOrigin/dxy));
+      tempX = (int)round(samples[i][0]-xOrigin/dxy);
+      tempY = (int)round(samples[i][1]-yOrigin/dxy);
+      if(map[tempX][tempY]!=0){
+        i = i-1; //Repeat until we find nS good samples
+      }else{
+        marker_point.x = samples[i][0]*dxy;
+        marker_point.y = samples[i][1]*dxy;
+        points.points.push_back(marker_point);
+      }
+    }
+    pointArr.markers.push_back(points);
+
+    int numEdges = 20;
+    std::vector< std::vector< int > > edges ( nS, std::vector<int> ( nS, 0 ) );
+    float d[nS] ={0};
+    std::vector<int> ind(nS,0);
+    tempX = tempY = 0;
+    int counter =1;
+    for (int i = 0; i<nS; i++){
+      ROS_INFO("nowhere");
+        //Find closest neighbours
+        for (int j = 0; j<nS; j++){
+          ROS_INFO("there");
+          tempX = samples[i][0] - samples[j][0];
+          tempY = samples[i][1] - samples[j][1];
+          d[j] = sqrt(tempX*tempX + tempY*tempY);
+        }
+        //sort in ascending order
+        Solution3::sort_idxtbl(d,d+nS,ind.begin());
+		
+        //Check for edge collisions
+        for (int j=0;j<numEdges;j++){
+          ROS_INFO("here");
+          int cur = ind[j];
+          if (i<cur){
+            if (CheckCollisionMap(samples[i][0], samples[i][1], samples[cur][0], samples[cur][1])==0){
+              edges[i][cur] = 1;
+              edges[cur][i] = 1;
+              if(edges[i][cur]==1){
+                lines.points.clear();
+                start_point.x = samples[i][0]*dxy;
+                start_point.y = samples[i][1]*dxy;
+                end_point.x = samples[cur][0]*dxy;
+                end_point.y = samples[cur][1]*dxy;
+                lines.id = counter;
+                lines.points.push_back(start_point);
+                lines.points.push_back(end_point);
+                pointArr.markers.push_back(lines);
+                counter++;
+              }
+            }
+          }
+
+        }
+    }
+
+    marker_pub.publish(pointArr);
+    ROS_INFO("counyer: %d",counter);
+
+	//find shortest path for all waypoints
+    std::vector<int> sp;
+    std::vector<int> tempsp;
+    for(int i=0;i<waypoint.size()-1;i++){
+      tempsp.clear();
+      tempsp = shortestpath(samples, edges, i, i+1);
+      sp.insert(sp.end(),tempsp.begin(), tempsp.end());
+    }
+
+
+    ROS_INFO("done shortpath");
+    visualization_msgs::Marker fin;
+    fin.header.frame_id = "/map";
+    fin.id = counter; 
+    fin.type = visualization_msgs::Marker::LINE_STRIP;
+    fin.action = visualization_msgs::Marker::ADD;
+    fin.ns = "line_segm";
+    fin.scale.x = 0.05;
+    fin.color.r = 0.0;
+    fin.color.b = 0.0;
+    fin.color.g = 1.0;
+    fin.color.a = 1.0;
+    for (int i=0;i<sp.size();i++){
+      start_point.x = samples[sp[i]][0]*dxy;
+      start_point.y = samples[sp[i]][1]*dxy;
+      start_point.z = 1;
+      fin.points.push_back(start_point);
+    }
+    pointArr.markers.push_back(fin);
+    marker_pub.publish(pointArr);
+    ROS_INFO("done");
+
+    //controller gain val.
+    const float k = 1.0;
+    
+    //Set the loop rate
+    ros::Rate loop_rate(10);    //20Hz update rate
+
+    const float DT = 0.1; // inverse of loop_rate
+
+    // Waypoint
+    int length = sp.size();// number of waypoints
+
+    //Current Measurement
+    std::vector<float> YMeasure(3);
+
+    float x = 0, y = 0, ang_error = 1, dist_error, des_bearing;
+    vel.linear.x = 0;
+    vel.angular.z = 0;
+	
+	//go through all sample points provided by the shortest path algorithm
+    for (int i = 1; i < length && ros::ok(); i++)
+    {
+        ROS_INFO ("i = %d, dist_error = %f", i, dist_error);
+        x = samples[sp [i]][0] * dxy;
+        y = samples[sp [i]][1] * dxy;
+
+        loop_rate.sleep(); //Maintain the loop rate
+        ros::spinOnce();   //Check for new messages
+
+        path.header.stamp = ros::Time::now();
+        path_pos.header.stamp = ros::Time::now();
+
+        dist_error = 10;
+
+        while (fabs(dist_error) > 0.1 && ros::ok())
+        {
+			//uses ips value when available or motion model to estimate position
+            if (ips_check)
+            {
+                //at 1 Hz, update using IPS
+                YMeasure[0] = ips_x ;
+                YMeasure[1] = ips_y ;
+                YMeasure[2] = ips_yaw ;
+                ips_check   = false;
+                ROS_INFO("helpdistnace");
+
+                //Collecting data for creating plots as well as for displaying the path of the average path in rviz
+                path_pos.pose.position.x = ips_x;
+                path_pos.pose.position.y = ips_y;
+                path_pos.pose.position.z = 0;
+                path_pos.pose.orientation = tf::createQuaternionMsgFromYaw(ips_yaw);
+
+                path.poses.push_back(path_pos);
+
+            }
+            else
+            {
+                //at 10Hz, update using Odom
+                YMeasure[0] = YMeasure[0] + DT*cos(YMeasure[2]) * vel.linear.x;
+                YMeasure[1] = YMeasure[1] + DT*sin(YMeasure[2]) * vel.linear.x;
+                YMeasure[2] = YMeasure[2] + DT                  * vel.angular.z;
+                YMeasure[2] = atan2(sin(YMeasure[2]), cos(YMeasure[2]));
+            }
+
+            loop_rate.sleep(); //Maintain the loop rate
+            ros::spinOnce();   //Check for new messages
+			
+			//calculate cngle offset
+            des_bearing = atan2(y - YMeasure[1], x - YMeasure[0]);
+            ang_error = des_bearing - YMeasure[2];
+            ang_error = atan2(sin(ang_error),cos(ang_error));
+			
+            while (fabs(ang_error) > 0.2 && ros::ok())//radians ~5 degrees
+            {
+                if (ips_check)
+                {
+                    //at 1 Hz, update using IPS
+                    YMeasure[0] = ips_x ;
+                    YMeasure[1] = ips_y ;
+                    YMeasure[2] = ips_yaw ;
+                    ips_check   = false;
+                    ROS_INFO("helpang, ips_yaw = %f", ips_yaw);
+                }
+                else
+                {
+                    //at 10Hz, update using Odom
+                    YMeasure[0] = YMeasure[0] + DT*cos(YMeasure[2]) * vel.linear.x;
+                    YMeasure[1] = YMeasure[1] + DT*sin(YMeasure[2]) * vel.linear.x;
+                    YMeasure[2] = YMeasure[2] + DT                  * vel.angular.z;
+                    YMeasure[2] = atan2(sin(YMeasure[2]), cos(YMeasure[2]));
+                }
+
+                loop_rate.sleep(); //Maintain the loop rate
+                ros::spinOnce();   //Check for new messages
+
+                ang_error = des_bearing - YMeasure[2];
+                ang_error = atan2(sin(ang_error),cos(ang_error));
+
+                // Angular Velocity is equal to my current error
+                vel.angular.z = k*ang_error;
+                vel.linear.x  = 0;
+                velocity_publisher.publish(vel); // Publish the command velocity
+                
+                //Publish points and paths
+                path_pub.publish(path);
+            }
+
+            dist_error = sqrt((y-YMeasure[1])*(y-YMeasure[1]) + (x-YMeasure[0])*(x-YMeasure[0]));
+
+            //go straight
+            // Angular Velocity is equal to my current error
+            vel.angular.z = 0;
+            vel.linear.x  = 0.15;
+            velocity_publisher.publish(vel); // Publish the command velocity
+        }
+        vel.angular.z = 0;
+        vel.linear.x  = 0;
+        velocity_publisher.publish(vel); // Publish the command velocity
+    }
+    return 0;
+}
