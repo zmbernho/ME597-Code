@@ -1,0 +1,66 @@
+//IPS position/orientation
+double ips_x;
+double ips_y;
+double ips_yaw;
+
+//Odometry position/orientation
+double linear_vel;
+double angular_vel;
+
+//linear vel. of robot
+const float v = 1.0;
+//controller gain val.
+const float k = 1.0;
+
+//Motion model
+std::vector <float> position(3);
+//get init. positions (spinonce?)
+
+//holds angular v
+float angV(1);
+
+//dt is the update rate (10 Hz)
+const float dt = 0.1;
+
+ // If in a 0.25m radius of point assume you are at the point
+const float radius = 0.25;
+
+// Waypoint
+int length = 0;// number of waypoints
+// get current waypoint (x, y, theta)
+std::vector <std::vector<float>> waypoint(3)(length);
+
+//error = desired bearing - actual bearing
+std::vector<float> error(length-1);
+std::vector<float> des_bearing(length-1);
+
+for (int i = 0; i < length(waypoint[1]); i++)
+{
+    while (error[i] > 0.01)//radians ~5 degrees
+    {
+        des_bearing[i] = atan2( waypoint[1][i+1] - position[1], waypoint[0][i+1] - position[0]);
+
+        error [i] = des_bearing[i] - position[2];
+
+
+        // Angular Velocity is equal to my current error
+        angV [i] = k*error[i];
+
+        // Position Update
+        //get ips x, ips y, ips yaw
+    }
+
+}
+
+
+
+
+// Update Waypoint
+if (sqrt(pow(Position[0,i] - //current waypoint[x]),2) + (pow(Position[1,i]) - current waypoint[y]),2)) < radius
+// update to next waypoint
+// get next waypoint (x, y, theta)
+// waypoint[0] = new_waypoint[0];
+// waypoint[1] = new_waypoint[1];
+// waypoint[2] = new_waypoint[2];
+else
+	// Do Nothing = keep moving (update angular velocity in loop)
