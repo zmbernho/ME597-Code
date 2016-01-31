@@ -1,0 +1,351 @@
+#include <ros/ros.h>
+#include <geometry_msgs/PoseStamped.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
+#include <tf/transform_datatypes.h>
+#include <gazebo_msgs/ModelStates.h>
+#include <visualization_msgs/Marker.h>
+#include <nav_msgs/Odometry.h>
+#include <nav_msgs/Path.h>
+#include <Eigen/Dense>
+#include <math.h>
+#include <iostream>
+#include <fstream>
+
+using namespace Eigen;
+using namespace std;
+
+//IPS position/orientation
+double ips_x;
+double ips_y;
+double ips_yaw;
+
+//Odometry position/orientation
+double linear_vel;
+double angular_vel;
+
+//Set the number of particles
+const int PARTICLE_NUM = 500;
+//time step for calculations (10Hz)
+const double DT = 0.1;
+
+//For Bresenham functon
+short sgn(int x) { return x >= 0 ? 1 : -1; }
+
+//To Check if robot has moved
+bool actuallymoved = false;
+
+//For collecting data for graphs
+float bag_ipsx;
+float bag_ipsy;
+float bag_ipsyaw;
+
+//Callback function for the Position topic (SIMULATION)
+void pose_callback(const gazebo_msgs::ModelStates& msg) 
+{ 
+    int i;
+    for(i = 0; i < msg.name.size(); i++) 
+    	if(msg.name[i] == "mobile_base") 
+    		break;
+
+    //Collect data for plotting
+    bag_ipsx   = msg.pose[i].position.x;
+    bag_ipsy   = msg.pose[i].position.y;
+    bag_ipsyaw = tf::getYaw(msg.pose[i].orientation);
+
+    //only get values if the robot is moving significantly (remove noise)
+	if (abs(linear_vel)*DT > 0.001 || abs(angular_vel)*DT > 0.001)
+	{
+		actuallymoved = true;
+		ips_x   = msg.pose[i].position.x ;
+    	ips_y   = msg.pose[i].position.y ;
+    	ips_yaw = bag_ipsyaw;
+    }
+}
+
+//Callback function for the Odometry topic (SIMULATION)
+void odom_callback(const nav_msgs::Odometry& msg) 
+{
+	linear_vel  = msg.twist.twist.linear.x;
+	angular_vel = msg.twist.twist.angular.z;
+
+	//only get values if the robot is moving significantly (remove noise)
+	if (abs(linear_vel)*DT > 0.001 || abs(angular_vel)*DT > 0.01)
+		actuallymoved = true;
+}
+
+
+//Callback function for the Position topic (LIVE)
+void pose_callbackLive(const geometry_msgs::PoseWithCovarianceStamped& msg)
+{	
+	//Collect data for plotting
+	bag_ipsx = 2.17*msg.pose.pose.position.x;
+	bag_ipsy = 2.17*msg.pose.pose.position.y;
+	bag_ipsyaw = tf::getYaw(msg.pose.pose.orientation);
+	if(bag_ipsyaw>0)
+	        bag_ipsyaw = bag_ipsyaw*-1+M_PI;
+		else		
+	        bag_ipsyaw = bag_ipsyaw*-1-M_PI;
+
+	if (abs(linear_vel)*DT > 0.001 || abs(angular_vel)*DT > 0.01)
+	{
+		actuallymoved = true;
+		ips_x = 2.17*msg.pose.pose.position.x; // Robot X psotition
+		ips_y = 2.17*msg.pose.pose.position.y; // Robot Y psotition
+		ips_yaw = bag_ipsyaw; // Robot Yaw
+	}
+}
+
+//Generating a number from a specific normal distribution
+float pdf (float X, float mu, float sigma)
+{
+	float y = 0;
+	y = 100000/sigma/sqrt(2*M_PI) * exp(-((X-mu)*(X-mu))/2/sigma/sigma);
+	return (y);
+}
+
+//Generating a random normally distributed number
+float normrand (float sigma)
+{
+	float u1 = rand();
+	float u2 = rand();
+	u1 = u1/RAND_MAX;
+	u2 = u2/RAND_MAX;
+	//Box Muller approximation
+	float z0 = sqrt(-2.0 * log(u1)) * cos(2.0 * M_PI * u2);
+	
+	return (z0 * sigma);
+}
+
+int main(int argc, char **argv)
+{	
+	ofstream data ("data.csv");
+	data << "Time" << ";" << "ips_x" << ";" << "ips_y" << ";" << "ips_yaw" << ";"
+	     << "interpolated x w/ noise" << ";" << "interpolated y w/ noise" << ";" << "interpolated yaw w/ noise" << ";"
+	     << "x est" << ";" << "y est" << ";" << "yaw est" << ";"
+	     << "actual error x" << ";" << "actual error y" << ";" << "actual error yaw" << ";"
+	     << "x error from noise" << ";"<< "y error from noise" << ";"<< "yaw error from noise" << endl;
+
+	float bag_ipsx_noise;
+	float bag_ipsy_noise;
+	float bag_ipsyaw_noise;
+
+	float bag_est_x;
+	float bag_est_y;
+	float bag_est_yaw;
+	float abs_yaw_err;
+	float interp_yaw_err;
+
+	//Initialize the ROS framework
+	ros::init(argc,argv,"main_control");
+	ros::NodeHandle n;
+
+	//Subscribe to the desired topics and assign callbacks
+	//ros::Subscriber pose_sub = n.subscribe("/gazebo/model_states", 1, pose_callback);
+	ros::Subscriber pose_sub = n.subscribe("/indoor_pos", 1, pose_callbackLive);
+	ros::Subscriber odom_sub = n.subscribe("/odom",1,odom_callback);
+
+	//Setup topics to Publish from this node
+	ros::Publisher marker_pub = n.advertise<visualization_msgs::Marker>("visualization_marker", 1, true);
+	ros::Publisher path_pub = n.advertise<nav_msgs::Path>("/path", 1, true);   
+
+	//Point to display on rviz
+	geometry_msgs::Point marker_point;
+	nav_msgs::Path path;
+	geometry_msgs::PoseStamped path_pos;
+
+	//Current Measurement
+	std::vector<float> YMeasure(3);
+	//Current Input
+	std::vector<float> InCurrent(3);
+
+	// Noise to Prediction
+	std::vector<float> Measurement_noise(3);
+	Measurement_noise [0] = 0.1;
+	Measurement_noise [1] = 0.1;
+	Measurement_noise [2] = 0;
+	
+	//tuneing factors for particle filter
+	std::vector<float> Motion_noise(3);
+	Motion_noise [0] = 0.1;
+	Motion_noise [1] = 0.1;
+	Motion_noise [2] = 0.1; 	
+	std::vector<float> tune_std_dev(3);
+	tune_std_dev [0] = 0.4;
+	tune_std_dev [1] = 0.4;
+	tune_std_dev [2] = 0.4; 	
+
+	//Particle
+	Matrix <float, 4, PARTICLE_NUM, RowMajor> Particle = Matrix<float, 4, PARTICLE_NUM>::Zero();
+
+	//Place Sample Points into Particles
+	for (int i = 0;i < PARTICLE_NUM; i++)
+	{
+		Particle (0,i) = ((rand() % 10000) - 5000)/1000.0;
+		Particle (1,i) = ((rand() % 10000) - 5000)/1000.0;
+		Particle (2,i) = double(rand())/RAND_MAX * 2 * M_PI - M_PI;
+	}
+
+	//used for re-sampling particles
+	std::vector<float> CumW (PARTICLE_NUM);
+	double seed;
+	Matrix <float, 4, PARTICLE_NUM, RowMajor> SelectedSamples = Matrix<float, 4, PARTICLE_NUM>::Zero();
+
+	//Set the loop rate
+	ros::Rate loop_rate(10);           //10Hz update rate
+
+	//For visualising particles in rviz
+	visualization_msgs::Marker points;
+	points.header.frame_id   = "/map";
+	points.ns                = "points_and_lines";
+	points.action            = visualization_msgs::Marker::ADD;
+	points.id                = 0;
+	points.type              = visualization_msgs::Marker::POINTS;
+	points.scale.x           = 0.1;
+	points.scale.y           = 0.1;
+	points.color.r           = 1.0f;
+	points.color.a           = 1;
+	path.header.frame_id     = "/map";
+	path_pos.header.frame_id = "/path_pos_frame";
+
+	//Keeps track of the number of times we go through the while loop (for switching between IPS and odom)
+	int loopcounter = 0;
+
+	while (ros::ok())
+	{
+		loop_rate.sleep();         //Maintain the loop rate
+	    ros::spinOnce();           //Check for new messages
+
+		points.header.stamp = ros::Time::now();
+		path.header.stamp = ros::Time::now();
+		path_pos.header.stamp = ros::Time::now();
+
+		//Set the input vector
+		InCurrent[0] = linear_vel;
+		InCurrent[1] = linear_vel;
+		InCurrent[2] = angular_vel;
+
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+	//Only perform calculations if the robot moves
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////		
+		if (actuallymoved == true)
+		{
+			loopcounter ++;
+
+			actuallymoved = false;
+			points.points.clear();
+
+			//Assign Measurement values. Use degraded ips values every 1Hz and Odom data every other time.
+			//Odom is used by integrating velocity based on the last ips value received
+			if (loopcounter % 10 == 0)
+			{
+				//at 1 Hz, update using IPS
+				YMeasure[0] = ips_x + normrand(Measurement_noise[0]);
+				YMeasure[1] = ips_y + normrand(Measurement_noise[1]);
+				YMeasure[2] = ips_yaw + normrand(Measurement_noise[2]);
+			}
+			else
+			{
+				//at 10Hz, update using Odom 
+				YMeasure[0] = YMeasure[0] + DT*cos(YMeasure[2])*InCurrent[0];
+				YMeasure[1] = YMeasure[1] + DT*sin(YMeasure[2])*InCurrent[1];
+				YMeasure[2] = YMeasure[2] + DT*InCurrent[2];
+				YMeasure[2] = atan2(sin(YMeasure[2]), cos(YMeasure[2]));
+			}
+
+			//collect data used for plotting
+			bag_ipsx_noise = YMeasure[0];
+			bag_ipsy_noise = YMeasure[1];
+			bag_ipsyaw_noise = YMeasure[2];
+
+			// Used for averaging particle sate
+			float totalx = 0, totaly = 0, total_yaw_err = 0;
+			float part_yaw_err = 0;
+
+			// Creating Particles and their Weights
+			for (int i = 0; i < PARTICLE_NUM; i++)
+			{	
+				//Particle motion update
+				Particle(0,i) = Particle(0,i) + DT*cos(Particle(2,i))*InCurrent[0] + normrand(Motion_noise[0]);
+				Particle(1,i) = Particle(1,i) + DT*sin(Particle(2,i))*InCurrent[1] + normrand(Motion_noise[1]);
+				Particle(2,i) = Particle(2,i) + DT*InCurrent[2] + normrand(Motion_noise[2]);
+				Particle(2,i) = atan2(sin(Particle(2,i)), cos(Particle(2,i)));
+				//used to handle effects of -pi to pi of yaw; which can cause issues with weighting
+				part_yaw_err = YMeasure[2]-Particle(2,i);
+				part_yaw_err = atan2(sin(part_yaw_err),cos(part_yaw_err));
+				//Assign particle weights
+				Particle(3,i) = (pdf(YMeasure[0],Particle(0,i),tune_std_dev[0]))*
+								(pdf(YMeasure[1],Particle(1,i),tune_std_dev[1]))*
+								(pdf(0,part_yaw_err,tune_std_dev[2])); //set X to 0 as it is handled by pre applying the subtraction in part_yaw_err
+				ROS_INFO("YMeasure PArticle err: %f, %f, %f", YMeasure[2],Particle(2,i),part_yaw_err);
+				
+				//Getting a cumulative weight		
+				if(i==0)
+					CumW[i] = Particle(3,i);
+				else
+					CumW[i] = CumW[i-1] + Particle(3,i);	
+				
+				//Sum all particle states for later average
+				totalx += Particle(0,i);				
+				totaly += Particle(1,i);
+				total_yaw_err += part_yaw_err;
+
+				//Used for visualising particles in rviz
+				marker_point.x = Particle(0,i);
+				marker_point.y = Particle(1,i);
+				points.points.push_back(marker_point);
+			}
+
+			//Collecting data for creating plots as well as for displaying the path of the average path in rviz
+			bag_est_x = path_pos.pose.position.x = totalx / PARTICLE_NUM;
+			bag_est_y = path_pos.pose.position.y = totaly / PARTICLE_NUM;
+			path_pos.pose.position.z = 0;
+			bag_est_yaw = YMeasure[2] + total_yaw_err / PARTICLE_NUM;
+			bag_est_yaw = atan2(sin(bag_est_yaw),cos(bag_est_yaw));
+			points.pose.orientation = path_pos.pose.orientation = tf::createQuaternionMsgFromYaw(bag_est_yaw);
+
+			path.poses.push_back(path_pos);
+			
+			// For resampiling particles
+			int a = 0;
+			for (int j = 0; j < PARTICLE_NUM; j++)
+			{
+				seed = CumW[PARTICLE_NUM-1]*(double(rand())/double(RAND_MAX));
+
+				// Determine Particles Greater than the Seed
+				for (int i = 0; i< PARTICLE_NUM; i++)
+					if (CumW[i] >= seed)
+					{
+						a = i;
+						i = PARTICLE_NUM + 1; //Condition to exit for loop
+					}
+
+				SelectedSamples (0,j) = Particle(0,a);
+				SelectedSamples (1,j) = Particle(1,a);
+				SelectedSamples (2,j) = Particle(2,a);
+			}
+			Particle = SelectedSamples;
+
+			abs_yaw_err = bag_ipsyaw - bag_est_yaw;
+			abs_yaw_err = abs(atan2(sin(abs_yaw_err),cos(abs_yaw_err)));
+			interp_yaw_err = bag_ipsyaw_noise - bag_est_yaw;
+			interp_yaw_err = abs(atan2(sin(interp_yaw_err),cos(interp_yaw_err)));
+
+			data << loopcounter*DT << ";" << bag_ipsx << ";" << bag_ipsy << ";" << bag_ipsyaw << ";"
+			     << bag_ipsx_noise << ";" << bag_ipsy_noise << ";" << bag_ipsyaw_noise << ";" 
+			     << bag_est_x << ";" << bag_est_y << ";" << bag_est_yaw  << ";"
+			     << abs(bag_ipsx - bag_est_x) << ";" << abs(bag_ipsy - bag_est_y) << ";" << abs_yaw_err <<  ";"
+			     << abs(bag_ipsx_noise - bag_est_x) << ";" << abs(bag_ipsy_noise - bag_est_y) << ";" << interp_yaw_err << endl; 
+		}
+	/////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+		//Publish points and paths
+		marker_pub.publish(points);
+		path_pub.publish(path);
+
+		//Write data for plotting
+		
+	}
+	//closing bag file output
+	data.close();
+	return 0;
+}
